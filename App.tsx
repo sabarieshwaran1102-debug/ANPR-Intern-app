@@ -15,6 +15,7 @@ const App: React.FC = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [showDoc, setShowDoc] = useState(false);
+  const [autoScan, setAutoScan] = useState(false);
   const [logs, setLogs] = useState<string[]>(["SYSTEM READY: Classical CV Environment Active"]);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -22,6 +23,7 @@ const App: React.FC = () => {
   const videoElRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const webcamStreamRef = useRef<MediaStream | null>(null);
+  const autoScanIntervalRef = useRef<number | null>(null);
 
   const addLog = (msg: string) => {
     setLogs(prev => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev].slice(0, 8));
@@ -39,6 +41,7 @@ const App: React.FC = () => {
     setImage(null);
     setResult(null);
     setCurrentStep(0);
+    setAutoScan(false);
     stopWebcam();
     addLog(`Switched to ${newMode} input mode.`);
   };
@@ -61,7 +64,7 @@ const App: React.FC = () => {
     const file = e.target.files?.[0];
     if (file) {
       const url = URL.createObjectURL(file);
-      setImage(url); // Using 'image' state to store video URL in video mode
+      setImage(url); 
       setCurrentStep(0);
       setResult(null);
       addLog(`Video Loaded: ${file.name}`);
@@ -85,6 +88,10 @@ const App: React.FC = () => {
     if (!videoElRef.current || !canvasRef.current) return null;
     const canvas = canvasRef.current;
     const video = videoElRef.current;
+    
+    // Ensure the video is actually playing and has dimensions
+    if (video.videoWidth === 0 || video.videoHeight === 0) return null;
+    
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     const ctx = canvas.getContext('2d');
@@ -92,13 +99,13 @@ const App: React.FC = () => {
     return canvas.toDataURL('image/png');
   };
 
-  const runPipeline = async () => {
+  const runPipeline = async (isAuto: boolean = false) => {
     let frameToProcess = image;
     
     if (mode === 'WEBCAM' || mode === 'VIDEO') {
       frameToProcess = captureFrame();
       if (!frameToProcess) {
-        addLog("ERROR: No frame captured from source.");
+        if (!isAuto) addLog("ERROR: No frame captured from source.");
         return;
       }
     }
@@ -106,9 +113,10 @@ const App: React.FC = () => {
     if (!frameToProcess) return;
 
     setIsProcessing(true);
-    setResult(null);
-    addLog("Executing Classical Pipeline on Captured Frame...");
+    if (!isAuto) setResult(null);
+    addLog(isAuto ? "Auto-Scanning Frame..." : "Executing Classical Pipeline on Captured Frame...");
     
+    // Sequence visualization logic
     const sequence = [
       { step: 1, log: "Kernel: Applying Bilateral Filter & CLAHE..." },
       { step: 2, log: "Geometry: Extracting Rectangular Contours..." },
@@ -116,10 +124,13 @@ const App: React.FC = () => {
       { step: 4, log: "Inference: k-NN Pattern Matching..." }
     ];
 
+    // For auto-scan, we skip or speed up visual delays to keep it reactive
+    const delay = isAuto ? 100 : 600;
+
     for (const item of sequence) {
       setCurrentStep(item.step);
-      addLog(item.log);
-      await new Promise(r => setTimeout(r, 600));
+      if (!isAuto) addLog(item.log);
+      await new Promise(r => setTimeout(r, delay));
     }
 
     try {
@@ -128,7 +139,7 @@ const App: React.FC = () => {
         model: 'gemini-3-flash-preview',
         contents: {
           parts: [
-            { text: "Act as a classical computer vision OCR engine using k-NN logic. Analyze the image and return ONLY the license plate number string. If none found, return 'NO_PLATE_DETECTED'." },
+            { text: "Act as a classical computer vision OCR engine using k-NN logic. Analyze the image and return ONLY the license plate number string found. If multiple, pick clearest. If none found, return 'NO_PLATE_DETECTED'." },
             { inlineData: { mimeType: 'image/png', data: frameToProcess.split(',')[1] } }
           ]
         },
@@ -136,20 +147,50 @@ const App: React.FC = () => {
       });
       
       const plateText = response.text?.trim() || "UNKNOWN";
-      setResult(plateText);
-      addLog(`RECOGNITION SUCCESS: ${plateText}`);
+      
+      // Update result if it's not 'NO_PLATE_DETECTED' or if it's a manual run
+      if (!isAuto || (plateText !== "NO_PLATE_DETECTED" && plateText !== result)) {
+        setResult(plateText);
+        addLog(`${isAuto ? 'AUTO-' : ''}RECOGNITION SUCCESS: ${plateText}`);
+      }
     } catch (error) {
-      addLog("PIPELINE ERROR: k-NN Classification Fault.");
-      setResult("ERR_DETECT");
+      if (!isAuto) {
+        addLog("PIPELINE ERROR: k-NN Classification Fault.");
+        setResult("ERR_DETECT");
+      }
     } finally {
       setIsProcessing(false);
     }
   };
 
+  // Effect to handle webcam initialization
   useEffect(() => {
-    if (mode === 'WEBCAM') startWebcam();
+    if (mode === 'WEBCAM') {
+      startWebcam();
+    } else {
+      stopWebcam();
+    }
     return () => stopWebcam();
   }, [mode]);
+
+  // Effect to handle real-time auto-scanning
+  useEffect(() => {
+    if (autoScan && !isProcessing) {
+      autoScanIntervalRef.current = window.setInterval(() => {
+        if (!isProcessing) {
+          runPipeline(true);
+        }
+      }, 3500); // Scan every 3.5 seconds to balance responsiveness and API load
+    } else if (!autoScan) {
+      if (autoScanIntervalRef.current) {
+        clearInterval(autoScanIntervalRef.current);
+        autoScanIntervalRef.current = null;
+      }
+    }
+    return () => {
+      if (autoScanIntervalRef.current) clearInterval(autoScanIntervalRef.current);
+    };
+  }, [autoScan, isProcessing, mode, image]);
 
   return (
     <div className="min-h-screen p-4 md:p-8 flex flex-col gap-6 font-mono text-slate-200 bg-[#0a0f1c]">
@@ -161,7 +202,7 @@ const App: React.FC = () => {
           </div>
           <div>
             <h1 className="text-2xl font-black tracking-tighter text-white">ANPR MULTI-SOURCE WORKBENCH</h1>
-            <p className="text-xs text-green-400 font-bold tracking-widest uppercase opacity-70">Classical CV Lab • Version 2.0</p>
+            <p className="text-xs text-green-400 font-bold tracking-widest uppercase opacity-70">Classical CV Lab • Real-Time v2.1</p>
           </div>
         </div>
         <div className="flex flex-wrap gap-2 justify-center">
@@ -171,6 +212,20 @@ const App: React.FC = () => {
             <button onClick={() => handleModeChange('WEBCAM')} className={`px-3 py-1 rounded-md text-[10px] font-bold transition-all ${mode === 'WEBCAM' ? 'bg-green-600 text-white' : 'text-slate-400 hover:text-white'}`}>WEBCAM</button>
           </div>
           
+          {(mode === 'VIDEO' || mode === 'WEBCAM') && (
+            <button 
+              onClick={() => setAutoScan(!autoScan)}
+              className={`px-4 py-2 border rounded-lg transition-all text-xs font-bold ${
+                autoScan 
+                  ? 'bg-red-500/20 border-red-500 text-red-400 shadow-[0_0_10px_rgba(239,68,68,0.2)]' 
+                  : 'bg-slate-800 border-slate-600 text-slate-400'
+              }`}
+            >
+              <i className={`fas ${autoScan ? 'fa-stop-circle' : 'fa-bolt'} mr-2 animate-pulse`}></i>
+              {autoScan ? 'STOP AUTO-SCAN' : 'START AUTO-SCAN'}
+            </button>
+          )}
+
           <button onClick={() => setShowDoc(true)} className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-600 rounded-lg transition-all text-xs">
             <i className="fas fa-file-alt mr-2"></i> DOCS
           </button>
@@ -191,10 +246,10 @@ const App: React.FC = () => {
           <input type="file" accept="video/*" className="hidden" ref={videoFileRef} onChange={handleVideoUpload} />
 
           <button 
-            onClick={runPipeline}
-            disabled={(!image && mode !== 'WEBCAM') || isProcessing}
+            onClick={() => runPipeline(false)}
+            disabled={(!image && mode !== 'WEBCAM') || isProcessing || autoScan}
             className={`px-6 py-2 font-bold rounded-lg transition-all transform active:scale-95 text-xs ${
-              (!image && mode !== 'WEBCAM') || isProcessing 
+              ((!image && mode !== 'WEBCAM') || isProcessing || autoScan)
                 ? 'bg-slate-700 text-slate-500 cursor-not-allowed border border-slate-600' 
                 : 'bg-green-600 hover:bg-green-500 text-white shadow-lg border border-green-400'
             }`}
@@ -211,9 +266,9 @@ const App: React.FC = () => {
           <div className="bg-slate-900/50 border border-slate-800 rounded-xl overflow-hidden flex flex-col h-full backdrop-blur-sm relative">
             <div className="p-3 border-b border-slate-800 flex justify-between items-center bg-black/20">
               <div className="flex items-center gap-2">
-                <div className={`w-2 h-2 rounded-full ${mode === 'WEBCAM' ? 'bg-red-500 animate-pulse' : 'bg-green-500'}`}></div>
+                <div className={`w-2 h-2 rounded-full ${mode === 'WEBCAM' || autoScan ? 'bg-red-500 animate-pulse' : 'bg-green-500'}`}></div>
                 <span className="text-[10px] uppercase tracking-[0.2em] text-slate-400 font-black">
-                  {mode} SOURCE FEED
+                  {mode} SOURCE FEED {autoScan && '• REAL-TIME ACTIVE'}
                 </span>
               </div>
               <div className="flex gap-1.5">
@@ -234,15 +289,26 @@ const App: React.FC = () => {
               )}
 
               {(mode === 'WEBCAM' || mode === 'VIDEO') && (
-                <video 
-                  ref={videoElRef} 
-                  autoPlay 
-                  muted 
-                  playsInline 
-                  loop={mode === 'VIDEO'}
-                  src={mode === 'VIDEO' ? image || undefined : undefined}
-                  className="max-w-full max-h-[60vh] object-contain rounded"
-                />
+                <div className="relative w-full h-full flex items-center justify-center overflow-hidden">
+                  <video 
+                    ref={videoElRef} 
+                    autoPlay 
+                    muted 
+                    playsInline 
+                    loop={mode === 'VIDEO'}
+                    src={mode === 'VIDEO' ? image || undefined : undefined}
+                    className={`max-w-full max-h-[60vh] object-contain rounded transition-all duration-300 ${isProcessing && !autoScan ? 'opacity-50 blur-sm' : ''}`}
+                  />
+                  {/* Real-time scanning animation overlay */}
+                  {autoScan && (
+                    <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center">
+                       <div className="w-full h-0.5 bg-green-500/50 shadow-[0_0_15px_#22c55e] animate-scan-line relative z-10"></div>
+                       <div className="absolute top-10 right-10 text-[10px] text-green-500 font-black animate-pulse flex items-center gap-2">
+                         <i className="fas fa-crosshairs"></i> TRACKING_ACTIVE
+                       </div>
+                    </div>
+                  )}
+                </div>
               )}
 
               {mode === 'IMAGE' && image && (
@@ -250,8 +316,12 @@ const App: React.FC = () => {
               )}
               
               {/* Overlay for detections when in Video/Webcam mode */}
-              {(mode === 'WEBCAM' || mode === 'VIDEO') && isProcessing && (
-                <div className="absolute inset-0 bg-green-500/10 border-4 border-dashed border-green-500/30 animate-pulse pointer-events-none"></div>
+              {(mode === 'WEBCAM' || mode === 'VIDEO') && isProcessing && !autoScan && (
+                <div className="absolute inset-0 bg-green-500/10 border-4 border-dashed border-green-500/30 animate-pulse pointer-events-none flex items-center justify-center">
+                   <div className="bg-slate-900/90 p-4 border border-slate-700 rounded-xl text-xs text-green-400 font-bold">
+                     <i className="fas fa-cog fa-spin mr-2"></i> ANALYZING FRAME...
+                   </div>
+                </div>
               )}
             </div>
 
@@ -268,14 +338,25 @@ const App: React.FC = () => {
                     ))}
                   </div>
                 </div>
-                <div className="flex flex-col items-center justify-center p-4 bg-slate-950/80 rounded border border-slate-800">
+                <div className="flex flex-col items-center justify-center p-4 bg-slate-950/80 rounded border border-slate-800 relative">
                    <p className="text-[10px] uppercase font-black text-slate-500 mb-2">Recognized Plate</p>
                    <div className={`text-5xl font-black tracking-[0.25em] transition-all duration-500 ${result ? 'text-white shadow-[0_0_15px_rgba(255,255,255,0.2)]' : 'text-slate-800'}`}>
-                      {result || (isProcessing ? "SCANNING..." : "--------")}
+                      {result || (isProcessing && !autoScan ? "SCANNING..." : "--------")}
                    </div>
-                   {result && (
-                     <div className="mt-3 text-[10px] text-green-500 bg-green-500/10 px-3 py-1 rounded border border-green-500/20 uppercase tracking-widest font-bold">
-                       Match Confirmed
+                   {result && result !== "NO_PLATE_DETECTED" && (
+                     <div className="mt-3 text-[10px] text-green-500 bg-green-500/10 px-3 py-1 rounded border border-green-500/20 uppercase tracking-widest font-bold flex items-center gap-2">
+                       <i className="fas fa-check-circle"></i> Match Confirmed
+                     </div>
+                   )}
+                   {result === "NO_PLATE_DETECTED" && (
+                     <div className="mt-3 text-[10px] text-red-500 bg-red-500/10 px-3 py-1 rounded border border-red-500/20 uppercase tracking-widest font-bold">
+                       Searching...
+                     </div>
+                   )}
+                   {autoScan && (
+                     <div className="absolute top-2 right-2 flex items-center gap-1.5">
+                       <span className="text-[8px] text-slate-500 uppercase">Live Feed</span>
+                       <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></div>
                      </div>
                    )}
                 </div>
@@ -296,13 +377,23 @@ const App: React.FC = () => {
         <div className="flex items-center gap-4">
           <span>Classical ANPR Lab</span>
           <span className="text-slate-800">|</span>
-          <span className="text-green-900 font-bold">Encrypted Link</span>
+          <span className="text-green-900 font-bold">Real-time Capture Engine Active</span>
         </div>
         <div className="flex items-center gap-2">
            <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></div>
-           SYSTEM_NOMINAL_100%
+           ENGINE_NOMINAL_OVR_094
         </div>
       </footer>
+      <style>{`
+        @keyframes scan {
+          0% { top: 0%; }
+          100% { top: 100%; }
+        }
+        .animate-scan-line {
+          position: absolute;
+          animation: scan 4s linear infinite;
+        }
+      `}</style>
     </div>
   );
 };
