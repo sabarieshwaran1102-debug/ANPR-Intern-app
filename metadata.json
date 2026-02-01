@@ -1,0 +1,7 @@
+{
+  "name": "Classical ANPR Workbench",
+  "description": "A computer vision workbench for Automatic Number Plate Recognition using traditional image processing and k-NN classification.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
